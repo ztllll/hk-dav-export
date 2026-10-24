@@ -141,12 +141,12 @@ def _dhav_time(ts):
         return None
 
 
-def scrub_stale_head(path, seg, scan=4 << 20, slack=timedelta(minutes=5)):
-    """清零段文件开头"磁盘复用残留"的旧帧,返回清零字节数。
+def scrub_stale_head(path, seg, scan=4 << 20, slack=timedelta(days=1)):
+    """清零段文件开头"磁盘复用残留"的旧帧。返回清零字节数;找到残留却没找到正片帧返回 -1。
 
     实测 50.3 预分配块头部会残留数月前的 DHAV 帧(如段 9/23 14:00 开头是 4/22 20:41),
-    播放器从首帧起播 → 画面时间错成晚上 8 点。正片首帧之前的 DHAV 一律视为残留。
-    只清零不截断:长度校验不变,重复执行幂等。"""
+    播放器从首帧起播 → 画面时间错成晚上 8 点。只有偏离段时间超过 slack(1 天)的帧才算残留,
+    相机时钟漂几分钟不会误删正片。只清零不截断:长度校验不变,重复执行幂等。"""
     try:
         t0 = datetime.strptime(seg["StartTime"], "%Y-%m-%d %H:%M:%S") - slack
         t1 = datetime.strptime(seg["EndTime"], "%Y-%m-%d %H:%M:%S") + slack
@@ -154,12 +154,12 @@ def scrub_stale_head(path, seg, scan=4 << 20, slack=timedelta(minutes=5)):
         return 0
     with open(path, "r+b") as f:
         buf = f.read(scan)
-        first_stale = i = None
+        first_stale = None
         i = 0
         while True:
             i = buf.find(b"DHAV", i)
             if i < 0 or i + 20 > len(buf):
-                return 0                        # 扫描范围内没找到正片帧:不动
+                return -1 if first_stale is not None else 0   # 有残留但 4 MiB 内没正片:不动,交给调用方告警
             t = _dhav_time(struct.unpack_from("<I", buf, i + 16)[0])
             if t and t0 <= t <= t1:
                 break
@@ -202,9 +202,11 @@ def download_segment(ip, auth, seg, out_path, retries=2, on_chunk=None):
             if expected > 0 and abs(size - expected) > 4096:
                 last_err = f"size mismatch got={size} exp={expected}"
                 raise RuntimeError(last_err)
-            scrub_stale_head(part, seg)
+            n = scrub_stale_head(part, seg)   # 结果放进 err 字段:成功时 CLI/GUI 都会显示该备注
+            note = (f"已清除段头残留旧帧 {n} 字节" if n > 0 else
+                    "!! 段头有残留旧帧但 4MiB 内未找到正片帧,未处理(播放时间可能不对)" if n < 0 else "")
             os.rename(part, out_path)
-            return True, size, time.time() - t0, ""
+            return True, size, time.time() - t0, note
         except (requests.RequestException, RuntimeError, OSError) as e:
             last_err = last_err or f"{type(e).__name__}: {e}"
             if os.path.exists(part):

@@ -74,6 +74,13 @@ assert nd.scrub_stale_head(p, _seg) == 0, "幂等"
 with open(p, "wb") as f:                                # 干净段:不动
     f.write(b"DHII" + bytes(60) + _good)
 assert nd.scrub_stale_head(p, _seg) == 0
+_drift = _frame(_pack(2026, 9, 23, 13, 54, 57))         # 相机时钟漂 5 分钟:是正片,不能清
+with open(p, "wb") as f:
+    f.write(b"DHII" + bytes(60) + _drift + _good)
+assert nd.scrub_stale_head(p, _seg) == 0, "时钟漂移几分钟不算残留"
+with open(p, "wb") as f:                                # 只有残留、没有正片:不动并返回 -1
+    f.write(b"DHII" + bytes(60) + _stale)
+assert nd.scrub_stale_head(p, _seg) == -1
 os.remove(p)
 
 print("GUI 逻辑自检通过")
