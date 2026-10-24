@@ -141,6 +141,7 @@ def _dhav_time(ts):
         return None
 
 
+# ponytail: 残留离本段 <1 天会被当正片而静默不清;实测残留都是数月前。真遇到再按帧时间单调性判断。
 def scrub_stale_head(path, seg, scan=4 << 20, slack=timedelta(days=1)):
     """清零段文件开头"磁盘复用残留"的旧帧。返回清零字节数;找到残留却没找到正片帧返回 -1。
 
@@ -174,7 +175,8 @@ def scrub_stale_head(path, seg, scan=4 << 20, slack=timedelta(days=1)):
 
 
 def download_segment(ip, auth, seg, out_path, retries=2, on_chunk=None):
-    """下载单段,验 magic+长度,返回 (ok, bytes, seconds, err)。"""
+    """下载单段,验 magic+长度,返回 (ok, bytes, seconds, err)。
+    ok=True 时 err 可能是备注("已清除…")或以 "!!" 开头的告警(段头残留未能清理,播放时间可能不对)。"""
     fp = seg["FilePath"]
     expected = int(seg.get("Length", 0) or 0)
     url = f"http://{ip}/cgi-bin/RPC_Loadfile{urllib.parse.quote(fp, safe='/')}"
@@ -347,7 +349,7 @@ def main():
     # === 2. 下载:全局线程池,每 NVR 信号量限流 ===
     sem = {ip: threading.Semaphore(args.per_nvr) for ip in nvrs}
     stats = {"ok": 0, "fail": 0, "bytes": 0}
-    fails = []
+    fails, warns = [], []
     t_start = time.time()
 
     def run_job(job):
@@ -359,6 +361,8 @@ def main():
             if ok:
                 stats["ok"] += 1
                 stats["bytes"] += size
+                if err.startswith("!!"):
+                    warns.append((ip, ch, name, seg["FilePath"], err))
             else:
                 stats["fail"] += 1
                 fails.append((ip, ch, name, seg["FilePath"], err))
@@ -381,6 +385,10 @@ def main():
         f"{stats['bytes'] / 1e9:.1f} GB / {elapsed:.0f}s "
         f"(均速 {stats['bytes'] / max(elapsed, 0.1) / 1e6:.0f} MB/s)"
     )
+    if warns:
+        log(f"告警清单({len(warns)} 段,文件已保存但播放时间可能不对,请抽查):")
+        for ip, ch, name, fp, err in warns:
+            log(f"  {ip} ch{ch} {name} {fp} → {err}")
     if fails:
         log("失败清单:")
         for ip, ch, name, fp, err in fails:

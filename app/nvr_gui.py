@@ -215,7 +215,7 @@ class Exporter(threading.Thread):
         self.cancel_evt = threading.Event()
         self.lock = threading.Lock()
         self.stats = {"seg_done": 0, "seg_total": 0, "bytes_done": 0, "bytes_skipped": 0,
-                      "bytes_total": 0, "t0": None, "phase": "枚举中", "ok": 0, "fail": 0}
+                      "bytes_total": 0, "t0": None, "phase": "枚举中", "ok": 0, "fail": 0, "warn": 0}
 
     def _log(self, m):
         self.ev.put(("log", m))
@@ -360,6 +360,8 @@ class Exporter(threading.Thread):
                 self.stats["seg_done"] += 1
                 if ok:
                     self.stats["ok"] += 1
+                    if err.startswith("!!"):
+                        self.stats["warn"] += 1
                 else:
                     self.stats["fail"] += 1
             tag = "OK  " if ok else "FAIL"
@@ -404,7 +406,7 @@ class Exporter(threading.Thread):
             self._download()
             with self.lock:
                 st = dict(self.stats)
-            self.ev.put(("done", {"cancelled": False, "ok": st["ok"], "fail": st["fail"],
+            self.ev.put(("done", {"cancelled": False, "ok": st["ok"], "fail": st["fail"], "warn": st["warn"],
                                   "skipped": self.skipped_n, "bytes": st["bytes_done"],
                                   "elapsed": time.time() - st["t0"] if st["t0"] else 0,
                                   "stopped": self.stop_evt.is_set(), "out": self.cfg["out"]}))
@@ -839,7 +841,7 @@ class App:
         segs.append(("\n◆ 上次导出\n", "h"))
         le = self.last_export
         if le:
-            st = "已停止" if le.get("stopped") else ("有失败" if le.get("fail") else "完成")
+            st = "已停止" if le.get("stopped") else ("有失败" if le.get("fail") else ("有告警" if le.get("warn") else "完成"))
             segs.append(("  %s  OK %d 失败 %d 跳过 %d\n" % (st, le["ok"], le["fail"], le["skipped"]), "v"))
             segs.append(("  %s / %s\n" % (fmt_gb(le["bytes"]), fmt_ts(le["elapsed"])), "k"))
         else:
@@ -1183,6 +1185,9 @@ class App:
             self._log("已取消/停止")
             return
         self.last_export = dict(d)              # 侧栏展示最近导出
+        if d.get("warn"):
+            self._log("!! %d 段段头残留旧帧未能清理,播放时间可能不对(见上方 !! 行),请抽查" % d["warn"])
+            messagebox.showwarning("播放时间告警", "%d 段文件开头的残留旧画面未能清理,\n播放起始时间可能不对,请按日志中 !! 行抽查。" % d["warn"])
         if d.get("fail"):
             self._log("完成但有失败:OK=%d FAIL=%d,建议重新点击[预检并导出]续传失败段" % (d["ok"], d["fail"]))
             messagebox.showwarning("部分失败", "OK=%d,FAIL=%d\n重跑即可自动续传失败段" % (d["ok"], d["fail"]))
