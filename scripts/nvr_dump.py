@@ -26,12 +26,14 @@ nvr_dump.py — 大华 NVR 批量原始 .dav 下载(不转码)
 import argparse
 import os
 import re
+import struct
 import sys
 import threading
 import time
 import urllib.parse
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 
 import requests
 from requests.auth import HTTPDigestAuth
@@ -130,6 +132,47 @@ def safe_name(name):
     return re.sub(r'[\\/:*?"<>|]', "_", name).replace(" ", "_")
 
 
+def _dhav_time(ts):
+    """DHAV 帧头 +16 处的打包时间 → datetime(大华位域:秒6/分6/时5/日5/月4/年6+2000)。"""
+    try:
+        return datetime(((ts >> 26) & 63) + 2000, (ts >> 22) & 15, (ts >> 17) & 31,
+                        (ts >> 12) & 31, (ts >> 6) & 63, ts & 63)
+    except ValueError:
+        return None
+
+
+def scrub_stale_head(path, seg, scan=4 << 20, slack=timedelta(minutes=5)):
+    """清零段文件开头"磁盘复用残留"的旧帧,返回清零字节数。
+
+    实测 50.3 预分配块头部会残留数月前的 DHAV 帧(如段 9/23 14:00 开头是 4/22 20:41),
+    播放器从首帧起播 → 画面时间错成晚上 8 点。正片首帧之前的 DHAV 一律视为残留。
+    只清零不截断:长度校验不变,重复执行幂等。"""
+    try:
+        t0 = datetime.strptime(seg["StartTime"], "%Y-%m-%d %H:%M:%S") - slack
+        t1 = datetime.strptime(seg["EndTime"], "%Y-%m-%d %H:%M:%S") + slack
+    except (KeyError, ValueError):
+        return 0
+    with open(path, "r+b") as f:
+        buf = f.read(scan)
+        first_stale = i = None
+        i = 0
+        while True:
+            i = buf.find(b"DHAV", i)
+            if i < 0 or i + 20 > len(buf):
+                return 0                        # 扫描范围内没找到正片帧:不动
+            t = _dhav_time(struct.unpack_from("<I", buf, i + 16)[0])
+            if t and t0 <= t <= t1:
+                break
+            if first_stale is None:
+                first_stale = i
+            i += 4
+        if first_stale is None:
+            return 0
+        f.seek(first_stale)
+        f.write(bytes(i - first_stale))
+        return i - first_stale
+
+
 def download_segment(ip, auth, seg, out_path, retries=2, on_chunk=None):
     """下载单段,验 magic+长度,返回 (ok, bytes, seconds, err)。"""
     fp = seg["FilePath"]
@@ -159,6 +202,7 @@ def download_segment(ip, auth, seg, out_path, retries=2, on_chunk=None):
             if expected > 0 and abs(size - expected) > 4096:
                 last_err = f"size mismatch got={size} exp={expected}"
                 raise RuntimeError(last_err)
+            scrub_stale_head(part, seg)
             os.rename(part, out_path)
             return True, size, time.time() - t0, ""
         except (requests.RequestException, RuntimeError, OSError) as e:

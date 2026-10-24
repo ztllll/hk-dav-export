@@ -475,7 +475,7 @@ class DTPicker(tk.Toplevel):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("NVR 录像导出工具 v2.7")
+        root.title("NVR 录像导出工具 v2.8")
         root.geometry("1120x700")
         root.minsize(1000, 620)
         self.dark = False                        # 默认浅色;顶栏可切换暗色

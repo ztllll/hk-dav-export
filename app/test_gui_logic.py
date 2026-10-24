@@ -52,4 +52,28 @@ assert g.fmt_gb(163.5e9) == "163.5 GB"
 assert g.fmt_gb(800e6) == "800.0 MB"
 assert len(g.README_TEXT) > 200
 
+# ── scrub_stale_head:段头部磁盘复用残留的旧帧必须清掉(否则播放器从 4/22 20:41 起播)
+import struct, tempfile
+nd = g.nd
+def _pack(y, mo, d, h, mi, s):
+    return ((y - 2000) << 26) | (mo << 22) | (d << 17) | (h << 12) | (mi << 6) | s
+def _frame(ts):
+    return b"DHAV" + bytes(12) + struct.pack("<I", ts) + bytes(40)
+_seg = {"StartTime": "2026-09-23 14:00:00", "EndTime": "2026-09-23 15:00:00"}
+_stale = _frame(_pack(2026, 4, 22, 20, 41, 27)) * 3
+_good = _frame(_pack(2026, 9, 23, 14, 0, 0)) + _frame(_pack(2026, 9, 23, 14, 0, 1))
+with tempfile.NamedTemporaryFile(delete=False) as f:
+    f.write(b"DHII" + bytes(60) + _stale + bytes(16) + _good)
+    p = f.name
+size0 = os.path.getsize(p)
+assert nd.scrub_stale_head(p, _seg) == len(_stale) + 16
+data = open(p, "rb").read()
+assert len(data) == size0 and data[:4] == b"DHII", "长度/magic 不能变"
+assert data.find(b"DHAV") == 64 + len(_stale) + 16, "首个 DHAV 必须是正片帧"
+assert nd.scrub_stale_head(p, _seg) == 0, "幂等"
+with open(p, "wb") as f:                                # 干净段:不动
+    f.write(b"DHII" + bytes(60) + _good)
+assert nd.scrub_stale_head(p, _seg) == 0
+os.remove(p)
+
 print("GUI 逻辑自检通过")
