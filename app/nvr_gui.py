@@ -113,6 +113,12 @@ ABOUT_TEXT = """══════════ NVR 录像导出工具 v2.0 ═�
   8 海康设备异常:确认 ISAPI 已开启、固件支持 ContentMgmt/download;
     因未经实测,请先小批量验证并反馈
 
+【连接配置】
+  检测成功后自动记住 NVR 连接,下次启动自动载入并检测;点「重新检测」可修改
+  保存在 %APPDATA%\\NVR_Export\\conns.json,密码用 Windows DPAPI 加密,
+  只有同一台电脑的同一 Windows 账户能解开;删除该文件即恢复默认
+  有 NVR 检测失败时连接框不会收起:请改正密码,避免反复登录失败导致账号被锁
+
 【性能参考】(大华实测 2026-07-12)
   4 台 NVR 聚合 ~50 MB/s(写本机 SSD)/ ~25 MB/s(写 NTFS 移动硬盘)
   490 段 / 163.5 GB 约 107 分钟,0 失败
@@ -543,6 +549,7 @@ class App:
         self._nvr = {}                          # ip → 分组行 iid
         self._parent_of = {}                    # 通道 iid → NVR 分组 iid
         self._log_open = False
+        self._pending_conns = []                # 本次检测所用连接,检测成功后保存
         self._build()
         self._apply_theme(False)                # 默认浅色;顶栏按钮可切换暗色
         root.after(150, self._poll)             # 后台事件唯一消费入口(丢失=界面永远无反应)
@@ -1140,14 +1147,19 @@ class App:
                             self._log("!! %s 检测失败: %s" % (ip, m))
                         if ok:
                             n = len(self._all)
-                            try:
-                                save_conns(self._pending_conns)
-                                self._log("已保存 NVR 连接配置(下次启动自动载入):%s" % CONF_PATH)
-                            except Exception as e:      # 保存失败不影响本次使用
-                                self._log("!! 保存连接配置失败:%s" % e)
+                            # 检测期间用户改过连接框:不覆盖保存、不收起,等用户自己再点检测
+                            edited = parse_conn(self.txt_conn.get("1.0", "end"))[0] != self._pending_conns
+                            if not edited:
+                                try:
+                                    save_conns(self._pending_conns)
+                                    self._log("已保存 NVR 连接配置(下次启动自动载入):%s" % CONF_PATH)
+                                except Exception as e:      # 保存失败不影响本次使用
+                                    self._log("!! 保存连接配置失败:%s" % e)
                             self._log("检测完成:%d 台 / %d 通道,请勾选后填写导出参数" % (len(ok), n))
-                            self.lbl_state.config(text="已检测 %d 台 / %d 通道" % (len(ok), n))
-                            self._collapse_conn(len(ok), n)
+                            fail = (",%d 台失败(查密码/网络)" % len(err)) if err else ""
+                            self.lbl_state.config(text="已检测 %d 台 / %d 通道%s" % (len(ok), n, fail))
+                            if not (edited or err):   # 有失败就留着编辑框,免得错密码每次启动都被自动重试
+                                self._collapse_conn(len(ok), n)
                         else:
                             self.lbl_state.config(text="检测失败(检查地址/网络/密码)")
                         self.btn_detect.config(state="normal")

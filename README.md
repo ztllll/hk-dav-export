@@ -3,6 +3,7 @@
 从大华(已实测)/海康(ISAPI,未经实测) NVR 批量导出**原始录像**(零转码)。Windows 单文件 GUI + 共用协议引擎 CLI。
 
 许可证 [MIT](LICENSE)。**不要把 NVR 账号密码提交进仓库**;CLI 必须显式传 `--password`,GUI 连接框自行填写。
+GUI 检测成功后会记住连接,保存在 `%APPDATA%\NVR_Export\conns.json`(密码用 Windows DPAPI 加密,只有同一台电脑的同一 Windows 账户能解开);下次启动自动载入并检测。删除该文件即恢复默认。
 
 宏毅考试中心现场用法:大华 `mediaFileFind.cgi` + `RPC_Loadfile`,原始 `.dav`。
 

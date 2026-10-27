@@ -94,5 +94,8 @@ open(_cfg, "w").write("{broken")
 assert g.load_conns(_cfg) == []
 assert g.load_conns(_cfg + ".missing") == []
 os.remove(_cfg)
+if os.name == "nt":                                     # 在 Windows 打包机上跑时覆盖真实 DPAPI
+    assert g._protect(g._protect("S3cret中文".encode(), True), False) == "S3cret中文".encode()
+    assert g._protect(b"S3cret", True) != b"S3cret"
 
 print("GUI 逻辑自检通过")
