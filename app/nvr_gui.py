@@ -928,6 +928,8 @@ class App:
 
     # ---- 事件 ----
     def on_detect(self):
+        if str(self.btn_detect["state"]) == "disabled":   # 启动自动检测与手动点击撞车:不重复登录
+            return
         conns, errs = parse_conn(self.txt_conn.get("1.0", "end"))
         if errs:
             messagebox.showwarning("连接格式有误", "请检查第1区连接列表:\n" + "\n".join(errs[:6]))
@@ -1149,7 +1151,9 @@ class App:
                             n = len(self._all)
                             # 检测期间用户改过连接框:不覆盖保存、不收起,等用户自己再点检测
                             edited = parse_conn(self.txt_conn.get("1.0", "end"))[0] != self._pending_conns
-                            if not edited:
+                            if edited:
+                                self._log("检测期间连接框已修改,未保存;确认后请再点[检测通道]")
+                            else:
                                 try:
                                     save_conns(self._pending_conns)
                                     self._log("已保存 NVR 连接配置(下次启动自动载入):%s" % CONF_PATH)
@@ -1345,10 +1349,31 @@ def _smoke():
     app.q.put(("log", "POLL_TEST"))
     hit = []
     root.after(400, lambda: hit.append("POLL_TEST" in app.txt.get("1.0", "end")))
+    root.after(450, lambda: hit.append(app.f_conn_edit.winfo_manager()))
     root.after(500, root.destroy)
     root.mainloop()
     assert hit and hit[0], "_poll 未运行:后台队列事件从未被消费"
     assert load_conns() == conns3, "检测成功后应保存连接配置"
+    assert hit[1] == "", "全部成功且未改动时应收起连接框"
+    # 有 NVR 失败:编辑框不收起(防错密码每次启动自动重试被锁)
+    root = tk.Tk()
+    app = App(root)
+    app._pending_conns = conns3
+    app.q.put(("channels", [("10.10.50.1", {0: "九教室东"})], [("10.10.50.9", "401")], {"10.10.50.1": nd}, {}))
+    # 检测期间改了连接框:不覆盖保存、不收起
+    def _edit_then_detect():
+        app.txt_conn.delete("1.0", "end")
+        app.txt_conn.insert("1.0", "10.10.50.7,admin,new")
+        app.q.put(("channels", [("10.10.50.1", {0: "九教室东"})], [], {"10.10.50.1": nd}, {}))
+    res = {}
+    root.after(400, lambda: res.update(fail_open=app.f_conn_edit.winfo_manager() == "grid"))
+    root.after(450, _edit_then_detect)
+    root.after(900, lambda: res.update(edit_open=app.f_conn_edit.winfo_manager() == "grid"))
+    root.after(1000, root.destroy)
+    root.mainloop()
+    assert res.get("fail_open"), "有失败时不应收起连接框"
+    assert res.get("edit_open"), "改过连接框时不应收起"
+    assert load_conns() == conns3, "检测期间改过连接框,不应覆盖保存"
     root2 = tk.Tk()
     app2 = App(root2)
     assert parse_conn(app2.txt_conn.get("1.0", "end"))[0] == conns3, "重启后应载回已保存的连接"
