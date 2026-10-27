@@ -1141,6 +1141,7 @@ class App:
                         self._log(ev[1])
                     elif kind == "channels":
                         ok, err, engines, brands = ev[1], ev[2], ev[3], ev[4]
+                        self.btn_detect.config(state="normal")   # 先恢复按钮:下面任何异常都不会让它永久禁用
                         self.engines = dict(engines)   # ip → 引擎模块
                         self._fill_channels(ok)
                         if brands:
@@ -1166,7 +1167,6 @@ class App:
                                 self._collapse_conn(len(ok), n)
                         else:
                             self.lbl_state.config(text="检测失败(检查地址/网络/密码)")
-                        self.btn_detect.config(state="normal")
                     elif kind == "precheck":
                         self._on_precheck(ev[1])
                     elif kind == "done":
@@ -1282,6 +1282,9 @@ def _smoke():
     global CONF_PATH
     import tempfile
     CONF_PATH = os.path.join(tempfile.mkdtemp(), "conns.json")   # 不读写真实配置
+    def _offline(*a, **k):          # 自检绝不连网:启动自动检测会拿占位密码登录真机,可能锁号
+        raise OSError("smoke offline")
+    nd.get_channel_titles = hkd.is_hikvision = hkd.get_channel_titles = _offline
     root = tk.Tk()
     app = App(root)
     app._fill_channels([("10.10.50.1", {0: "九教室东", 1: "九教室西", 2: ""}),
@@ -1356,9 +1359,13 @@ def _smoke():
     assert load_conns() == conns3, "检测成功后应保存连接配置"
     assert hit[1] == "", "全部成功且未改动时应收起连接框"
     # 有 NVR 失败:编辑框不收起(防错密码每次启动自动重试被锁)
+    os.remove(CONF_PATH)            # 这个实例只测事件处理:无已存配置 → 不触发启动自动检测
     root = tk.Tk()
     app = App(root)
-    app._pending_conns = conns3
+    other = [{"ip": "10.10.50.8", "user": "admin", "pass": "x"}]      # 与已保存文件不同,误存就能测出来
+    app._pending_conns = other
+    app.txt_conn.delete("1.0", "end")
+    app.txt_conn.insert("1.0", "10.10.50.8,admin,x")
     app.q.put(("channels", [("10.10.50.1", {0: "九教室东"})], [("10.10.50.9", "401")], {"10.10.50.1": nd}, {}))
     # 检测期间改了连接框:不覆盖保存、不收起
     def _edit_then_detect():
@@ -1366,14 +1373,20 @@ def _smoke():
         app.txt_conn.insert("1.0", "10.10.50.7,admin,new")
         app.q.put(("channels", [("10.10.50.1", {0: "九教室东"})], [], {"10.10.50.1": nd}, {}))
     res = {}
-    root.after(400, lambda: res.update(fail_open=app.f_conn_edit.winfo_manager() == "grid"))
+    root.after(400, lambda: res.update(fail_open=app.f_conn_edit.winfo_manager() == "grid",
+                                       fail_lbl=app.lbl_state.cget("text"), saved1=load_conns()))
     root.after(450, _edit_then_detect)
-    root.after(900, lambda: res.update(edit_open=app.f_conn_edit.winfo_manager() == "grid"))
+    root.after(900, lambda: res.update(edit_open=app.f_conn_edit.winfo_manager() == "grid",
+                                       edit_log="检测期间连接框已修改" in app.txt.get("1.0", "end")))
     root.after(1000, root.destroy)
     root.mainloop()
+    assert "1 台失败" in res.get("fail_lbl", ""), "失败事件应被处理并提示: %r" % res.get("fail_lbl")
     assert res.get("fail_open"), "有失败时不应收起连接框"
+    assert res.get("saved1") == other, "部分成功且未改动应保存全部行(含失败的)"
+    assert res.get("edit_log"), "改过连接框时应提示未保存"
     assert res.get("edit_open"), "改过连接框时不应收起"
-    assert load_conns() == conns3, "检测期间改过连接框,不应覆盖保存"
+    assert load_conns() == other, "检测期间改过连接框,不应覆盖保存"
+    save_conns(conns3)
     root2 = tk.Tk()
     app2 = App(root2)
     assert parse_conn(app2.txt_conn.get("1.0", "end"))[0] == conns3, "重启后应载回已保存的连接"
