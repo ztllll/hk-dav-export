@@ -8,6 +8,8 @@ nvr_gui.py — NVR 录像导出工具 GUI 版(tkinter 单文件)
      预检=枚举段数/大小/估时/查目标盘,弹窗确认→实时进度下载→自动写 说明.txt
 断点续传:重跑自动跳过已存在文件(.part 临时文件 + DHII 校验,与 CLI 同机制)。
 """
+import base64
+import json
 import os
 import re
 import sys
@@ -122,6 +124,55 @@ ABOUT_TEXT = """══════════ NVR 录像导出工具 v2.0 ═�
 IP_RE = re.compile(r"^\d{1,3}(\.\d{1,3}){3}$")
 WIN_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
 DIR_MODES = {"按教室合并": "classroom", "按通道完整名": "full", "全部平铺": "flat"}
+
+
+# ───────────────────── 连接配置持久化 ─────────────────────
+CONF_PATH = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "NVR_Export", "conns.json")
+
+
+def _protect(data, encrypt):
+    """Windows 用 DPAPI(CryptProtectData)加/解密:只有同一 Windows 账户能解。
+    非 Windows(开发/测试机)退化为原样,仅 base64 —— 不是加密,勿当安全措施。"""
+    if os.name != "nt":
+        return data
+    import ctypes
+    from ctypes import wintypes
+
+    class Blob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+    buf = ctypes.create_string_buffer(data, len(data))
+    src, dst = Blob(len(data), buf), Blob()
+    fn = ctypes.windll.crypt32.CryptProtectData if encrypt else ctypes.windll.crypt32.CryptUnprotectData
+    if not fn(ctypes.byref(src), None, None, None, None, 0x1, ctypes.byref(dst)):   # 0x1 = UI_FORBIDDEN
+        raise OSError("DPAPI 失败")
+    try:
+        return ctypes.string_at(dst.pbData, dst.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(dst.pbData)
+
+
+def save_conns(conns, path=None):
+    """保存连接列表;密码经 DPAPI 加密后 base64,不明文落盘。"""
+    path = path or CONF_PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    rows = [{"ip": c["ip"], "user": c["user"],
+             "pass": base64.b64encode(_protect(c["pass"].encode("utf-8"), True)).decode("ascii")}
+            for c in conns]
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"version": 1, "conns": rows}, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path)                       # 原子替换,写一半断电不会毁掉旧配置
+
+
+def load_conns(path=None):
+    """读取已保存的连接;文件不存在/损坏/换了 Windows 账户解不开 → 返回 []。"""
+    try:
+        with open(path or CONF_PATH, encoding="utf-8") as f:
+            rows = json.load(f)["conns"]
+        return [{"ip": r["ip"], "user": r["user"],
+                 "pass": _protect(base64.b64decode(r["pass"]), False).decode("utf-8")} for r in rows]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
 
 
 # ───────────────────── 纯逻辑(可单测) ─────────────────────
@@ -477,7 +528,7 @@ class DTPicker(tk.Toplevel):
 class App:
     def __init__(self, root):
         self.root = root
-        root.title("NVR 录像导出工具 v2.8")
+        root.title("NVR 录像导出工具 v2.9")
         root.geometry("1120x700")
         root.minsize(1000, 620)
         self.dark = False                        # 默认浅色;顶栏可切换暗色
@@ -582,7 +633,10 @@ class App:
         self.txt_conn = tk.Text(self.f_conn_edit, width=52, height=3, font=("Consolas", 9),
                                 wrap="none", relief="flat", bd=0)
         self.txt_conn.pack(side="left", padx=(4, 8), pady=3)
-        self.txt_conn.insert("1.0", DEFAULT_CONNS)
+        saved = load_conns()
+        self.txt_conn.insert("1.0", "\n".join("%(ip)s,%(user)s,%(pass)s" % c for c in saved) if saved else DEFAULT_CONNS)
+        if saved:                                   # 有保存的配置:启动即自动检测,省一次点击
+            self.root.after(300, self.on_detect)
         rbt = ttk.Frame(self.f_conn_edit)
         rbt.pack(side="left", fill="y")
         self.btn_detect = ttk.Button(rbt, text="检测通道", width=10, command=self.on_detect)
@@ -874,6 +928,7 @@ class App:
         if not conns:
             messagebox.showwarning("缺少连接", "请填写 NVR 连接(每行: 地址,账号,密码)")
             return
+        self._pending_conns = conns                 # 检测成功后保存
         self.btn_detect.config(state="disabled")
         self.lbl_state.config(text="检测中(并行 %d 台)…" % len(conns))
         self._log("检测 %s …" % ", ".join(c["ip"] for c in conns))
@@ -1085,6 +1140,11 @@ class App:
                             self._log("!! %s 检测失败: %s" % (ip, m))
                         if ok:
                             n = len(self._all)
+                            try:
+                                save_conns(self._pending_conns)
+                                self._log("已保存 NVR 连接配置(下次启动自动载入):%s" % CONF_PATH)
+                            except Exception as e:      # 保存失败不影响本次使用
+                                self._log("!! 保存连接配置失败:%s" % e)
                             self._log("检测完成:%d 台 / %d 通道,请勾选后填写导出参数" % (len(ok), n))
                             self.lbl_state.config(text="已检测 %d 台 / %d 通道" % (len(ok), n))
                             self._collapse_conn(len(ok), n)
@@ -1203,6 +1263,9 @@ class App:
 # ───────────────────── 入口 ─────────────────────
 def _smoke():
     """无头自检:构建 UI → 注入假通道 → 校验勾选/时间窗/参数收集。"""
+    global CONF_PATH
+    import tempfile
+    CONF_PATH = os.path.join(tempfile.mkdtemp(), "conns.json")   # 不读写真实配置
     root = tk.Tk()
     app = App(root)
     app._fill_channels([("10.10.50.1", {0: "九教室东", 1: "九教室西", 2: ""}),
@@ -1263,6 +1326,9 @@ def _smoke():
     assert app.lbl_cnt.cget("text") == "已勾选 4/4"
     conns3, errs3 = parse_conn(app.txt_conn.get("1.0", "end"))
     assert len(conns3) == 4 and not errs3
+    # v2.9:检测成功 → 保存;下次启动 → 连接框载回同样内容
+    app._pending_conns = conns3
+    app.q.put(("channels", [("10.10.50.1", {0: "九教室东"})], [], {"10.10.50.1": nd}, {"10.10.50.1": "大华"}))
     # 事件队列必须被 _poll 消费(v2.1 曾丢失 after 调度,导致界面永久无反应)
     app.q.put(("log", "POLL_TEST"))
     hit = []
@@ -1270,6 +1336,11 @@ def _smoke():
     root.after(500, root.destroy)
     root.mainloop()
     assert hit and hit[0], "_poll 未运行:后台队列事件从未被消费"
+    assert load_conns() == conns3, "检测成功后应保存连接配置"
+    root2 = tk.Tk()
+    app2 = App(root2)
+    assert parse_conn(app2.txt_conn.get("1.0", "end"))[0] == conns3, "重启后应载回已保存的连接"
+    root2.destroy()
     print("SMOKE_OK 通道=%s 匹配=%s 时间窗=%s 轮询=OK" % (sel, sel2, wins2))
     return
 

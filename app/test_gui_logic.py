@@ -83,4 +83,16 @@ with open(p, "wb") as f:                                # 只有残留、没有�
 assert nd.scrub_stale_head(p, _seg) == -1
 os.remove(p)
 
+# ── 连接配置持久化:存了原样读回;密码不明文落盘;坏文件/缺文件不崩
+_cfg = tempfile.mktemp(suffix=".json")
+_conns = [{"ip": "10.10.50.1", "user": "admin", "pass": "S3cret中文"},
+          {"ip": "10.10.50.2", "user": "op", "pass": "p2"}]
+g.save_conns(_conns, _cfg)
+assert g.load_conns(_cfg) == _conns, g.load_conns(_cfg)
+assert b"S3cret" not in open(_cfg, "rb").read(), "密码不能明文落盘"
+open(_cfg, "w").write("{broken")
+assert g.load_conns(_cfg) == []
+assert g.load_conns(_cfg + ".missing") == []
+os.remove(_cfg)
+
 print("GUI 逻辑自检通过")
